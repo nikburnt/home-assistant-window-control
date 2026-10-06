@@ -1,0 +1,12 @@
+{
+  "domain": "window_control",
+  "name": "Window Control",
+  "codeowners": ["@nikburnt"],
+  "config_flow": true,
+  "documentation": "https://github.com/nikburnt/home-assistant-window-control",
+  "integration_type": "device",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/nikburnt/home-assistant-window-control/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

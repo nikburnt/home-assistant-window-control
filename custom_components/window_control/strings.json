@@ -1,0 +1,21 @@
+{
+  "title": "Window Control",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Window Control",
+        "data": {"name": "Window name", "rollers": "Roller shades (left to right)", "curtain": "Curtain", "area_id": "Area", "stagger_seconds": "Start interval", "travel_timeout": "Movement confirmation timeout"}
+      },
+      "reconfigure": {
+        "title": "Window Control",
+        "data": {"name": "Window name", "rollers": "Roller shades (left to right)", "curtain": "Curtain", "area_id": "Area", "stagger_seconds": "Start interval", "travel_timeout": "Movement confirmation timeout"}
+      }
+    },
+    "error": {
+      "invalid_members": "Select at least one roller shade. A cover can occur only once.",
+      "already_owned": "A selected cover belongs to another Window Control or is a Window Control entity.",
+      "unsupported_cover": "Each cover must support open, close, stop and position control."
+    },
+    "abort": {"reconfigure_successful": "Window settings updated."}
+  }
+}
