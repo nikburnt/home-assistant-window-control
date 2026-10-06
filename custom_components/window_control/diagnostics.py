@@ -6,6 +6,7 @@ async def async_get_config_entry_diagnostics(hass, entry):
     return {
         "configuration": dict(entry.data),
         "verbose_logging": runtime.verbose,
+        "travel_times": dict(runtime.travel_times),
         "members": [
             {
                 "source": m.source,
@@ -13,6 +14,9 @@ async def async_get_config_entry_diagnostics(hass, entry):
                 "phase": m.phase,
                 "intent": m.intent,
                 "error": m.error,
+                "estimated_completion": m.estimated_completion.isoformat()
+                if m.estimated_completion
+                else None,
             }
             for m in runtime.members.values()
         ],

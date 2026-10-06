@@ -7,7 +7,7 @@ import logging
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from homeassistant.core import Context, callback
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
@@ -31,6 +31,8 @@ class Member:
     timer: Callable | None = None
     deadline: Callable | None = None
     task: asyncio.Task | None = None
+    estimated_completion: datetime | None = None
+    estimate_position: int | None = None
 
 
 class WindowRuntime:
@@ -47,6 +49,7 @@ class WindowRuntime:
         self.trace = deque(maxlen=50)
         self._unsub = None
         self._closed = False
+        self.travel_times = entry.options.get("travel_times", {})
 
     @property
     def verbose(self):
@@ -79,8 +82,46 @@ class WindowRuntime:
         state = self.state(source)
         return state is not None and state.state in ("opening", "closing")
 
+    def _update_estimate(self, member):
+        member.estimated_completion = None
+        member.estimate_position = self.position(member.source)
+        state = self.state(member.source)
+        if (
+            member.phase not in ("sending", "awaiting_confirmation")
+            or not isinstance(member.intent, int)
+            or member.estimate_position is None
+            or state is None
+            or state.state in ("unknown", "unavailable")
+        ):
+            member.estimate_position = None
+            return
+        distance = member.intent - member.estimate_position
+        direction = (
+            "opening_time"
+            if distance > 0 or (distance == 0 and state.state == "opening")
+            else "closing_time"
+        )
+        seconds = self.travel_times.get(member.source, {}).get(direction, 0)
+        if seconds > 0:
+            member.estimated_completion = dt_util.utcnow() + timedelta(
+                seconds=abs(distance) * seconds / 100
+            )
+
+    @callback
+    def update_options(self):
+        previous = self.travel_times
+        self.travel_times = self.entry.options.get("travel_times", {})
+        for member in self.members.values():
+            if previous.get(member.source) != self.travel_times.get(member.source):
+                self._update_estimate(member)
+        self.publish()
+
     def _reached(self, member):
-        if not self.available(member.source) or self.moving(member.source):
+        if (
+            not self.available(member.source)
+            or self.state(member.source).state == "unknown"
+            or self.moving(member.source)
+        ):
             return False
         if member.intent == "stop":
             state = self.state(member.source)
@@ -118,6 +159,7 @@ class WindowRuntime:
         member.ready = False
         member.phase = "error"
         member.error = reason
+        member.estimated_completion = None
         self.record(member, "failed", reason=reason)
 
     @callback
@@ -129,6 +171,15 @@ class WindowRuntime:
                 self._fail(member, "unavailable")
             elif member.phase == "awaiting_confirmation" and self._reached(member):
                 self._settled(member)
+            elif (
+                self.position(member.source) != member.estimate_position
+                or self.state(member.source).state == "unknown"
+                or (
+                    member.estimated_completion is None
+                    and self.state(member.source).state in ("opening", "closing")
+                )
+            ):
+                self._update_estimate(member)
         self.publish()
 
     def _settled(self, member):
@@ -136,6 +187,7 @@ class WindowRuntime:
         member.phase = "idle"
         member.intent = None
         member.error = None
+        member.estimated_completion = None
         self.record(member, "confirmed")
 
     @callback
@@ -187,6 +239,7 @@ class WindowRuntime:
             member.context = context
             member.ready = False
             member.error = None
+            member.estimated_completion = None
             if not self.available(source):
                 self._fail(member, "unavailable")
                 continue
@@ -235,6 +288,7 @@ class WindowRuntime:
                     service = "set_cover_position"
                     data["position"] = intent
                 member.phase = "sending"
+                self._update_estimate(member)
                 self.record(member, "dispatch", service=service, intent=intent)
                 self.publish()
                 try:
@@ -285,6 +339,7 @@ class WindowRuntime:
             self._cancel_timer(member, "timer")
             self._cancel_timer(member, "deadline")
             member.intent = None
+            member.estimated_completion = None
             if member.task:
                 member.task.cancel()
                 tasks.append(member.task)

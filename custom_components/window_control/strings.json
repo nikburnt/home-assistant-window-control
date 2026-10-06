@@ -1,5 +1,20 @@
 {
   "title": "Window Control",
+  "options": {
+    "step": {
+      "init": {
+        "title": "Travel Times",
+        "data": {"source": "Cover"}
+      },
+      "travel_times": {
+        "title": "Travel Times: {source}",
+        "description": "Full travel from closed to open and back. Zero disables the estimate for that direction. Estimates do not replace reported positions or change motor commands.",
+        "data": {"opening_time": "Full Opening Time", "closing_time": "Full Closing Time"}
+      }
+    },
+    "error": {"invalid_source": "Select a cover belonging to this window."},
+    "abort": {"source_removed": "This cover no longer belongs to the window. Open settings again."}
+  },
   "config": {
     "step": {
       "user": {

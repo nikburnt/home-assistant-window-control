@@ -97,6 +97,15 @@ class WindowCover(WindowEntity, CoverEntity):
                 if isinstance(member.intent, int)
                 else None,
                 "last_error": member.error,
+                "opening_time": self.runtime.travel_times.get(self.source, {}).get(
+                    "opening_time", 0
+                ),
+                "closing_time": self.runtime.travel_times.get(self.source, {}).get(
+                    "closing_time", 0
+                ),
+                "estimated_completion": member.estimated_completion.isoformat()
+                if member.estimated_completion
+                else None,
             }
         return {
             "window_control": True,

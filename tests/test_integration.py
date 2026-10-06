@@ -2,6 +2,8 @@
 
 import asyncio
 
+import pytest
+from homeassistant.data_entry_flow import InvalidData
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -221,3 +223,80 @@ async def test_reconfigure_removes_retired_proxies(hass):
     assert hass.states.get(retired) is None
     assert not entry.runtime_data.trace
     await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_timing_options_preserve_other_members_and_apply_without_reload(hass):
+    sources(hass)
+    entry = MockConfigEntry(
+        domain="window_control",
+        title="Window",
+        data=settings(),
+        options={
+            "verbose_logging": True,
+            "travel_times": {"cover.left": {"opening_time": 33, "closing_time": 30}},
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    runtime = entry.runtime_data
+    flow = await hass.config_entries.options.async_init(entry.entry_id)
+    assert flow["step_id"] == "init"
+    flow = await hass.config_entries.options.async_configure(
+        flow["flow_id"], {"source": "cover.right"}
+    )
+    assert flow["step_id"] == "travel_times"
+    result = await hass.config_entries.options.async_configure(
+        flow["flow_id"], {"opening_time": 41, "closing_time": 40}
+    )
+    assert result["type"] == "create_entry"
+    await hass.async_block_till_done()
+    assert entry.runtime_data is runtime
+    assert runtime.verbose
+    assert runtime.travel_times == {
+        "cover.left": {"opening_time": 33, "closing_time": 30},
+        "cover.right": {"opening_time": 41, "closing_time": 40},
+    }
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id(
+        "cover", "window_control", entry.entry_id + "_cover.right"
+    )
+    state = hass.states.get(entity_id)
+    assert state.attributes["opening_time"] == 41
+    assert state.attributes["closing_time"] == 40
+    assert state.attributes["estimated_completion"] is None
+    assert state.attributes["current_position"] == 80
+    assert not runtime.trace
+    flow = await hass.config_entries.options.async_init(entry.entry_id)
+    flow = await hass.config_entries.options.async_configure(
+        flow["flow_id"], {"source": "cover.right"}
+    )
+    assert flow["data_schema"]({}) == {"opening_time": 41, "closing_time": 40}
+    await hass.config_entries.options.async_configure(
+        flow["flow_id"], {"opening_time": 0, "closing_time": 0}
+    )
+    await hass.async_block_till_done()
+    assert runtime.travel_times["cover.right"]["opening_time"] == 0
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_timing_options_reject_outside_cover_and_removed_source(hass):
+    sources(hass)
+    entry = MockConfigEntry(domain="window_control", title="Window", data=settings())
+    entry.add_to_hass(hass)
+    flow = await hass.config_entries.options.async_init(entry.entry_id)
+    with pytest.raises(InvalidData):
+        await hass.config_entries.options.async_configure(
+            flow["flow_id"], {"source": "cover.other"}
+        )
+    flow = await hass.config_entries.options.async_configure(
+        flow["flow_id"], {"source": "cover.right"}
+    )
+    hass.config_entries.async_update_entry(
+        entry, data=settings() | {"rollers": ["cover.left"]}
+    )
+    result = await hass.config_entries.options.async_configure(
+        flow["flow_id"], {"opening_time": 41, "closing_time": 40}
+    )
+    assert result["reason"] == "source_removed"
+    assert not entry.options

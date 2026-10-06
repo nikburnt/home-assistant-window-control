@@ -2,6 +2,7 @@
 
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.core import callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.selector import (
     AreaSelector,
@@ -18,6 +19,11 @@ from .const import DOMAIN, FEATURES
 
 class WindowConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry):
+        return WindowOptionsFlow()
 
     def _schema(self, defaults):
         fields = {
@@ -105,4 +111,69 @@ class WindowConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="reconfigure",
             data_schema=self._schema(user_input or dict(entry.data)),
             errors=errors,
+        )
+
+
+class WindowOptionsFlow(config_entries.OptionsFlow):
+    async def async_step_init(self, user_input=None):
+        sources = list(self.config_entry.data["rollers"])
+        if curtain := self.config_entry.data.get("curtain"):
+            sources.append(curtain)
+        errors = {}
+        if user_input is not None:
+            if user_input["source"] in sources:
+                self._source = user_input["source"]
+                return await self.async_step_travel_times()
+            errors["source"] = "invalid_source"
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("source"): EntitySelector(
+                        EntitySelectorConfig(domain="cover", include_entities=sources)
+                    )
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_travel_times(self, user_input=None):
+        sources = list(self.config_entry.data["rollers"])
+        if curtain := self.config_entry.data.get("curtain"):
+            sources.append(curtain)
+        if self._source not in sources:
+            return self.async_abort(reason="source_removed")
+        if user_input is not None:
+            timings = {
+                source: value
+                for source, value in self.config_entry.options.get(
+                    "travel_times", {}
+                ).items()
+                if source in sources
+            }
+            timings[self._source] = user_input
+            return self.async_create_entry(
+                title="", data={**self.config_entry.options, "travel_times": timings}
+            )
+        defaults = self.config_entry.options.get("travel_times", {}).get(
+            self._source, {}
+        )
+        state = self.hass.states.get(self._source)
+        return self.async_show_form(
+            step_id="travel_times",
+            description_placeholders={"source": state.name if state else self._source},
+            data_schema=vol.Schema(
+                {
+                    vol.Required(key, default=defaults.get(key, 0)): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0,
+                            max=300,
+                            step=0.1,
+                            mode=NumberSelectorMode.BOX,
+                            unit_of_measurement="s",
+                        )
+                    )
+                    for key in ("opening_time", "closing_time")
+                }
+            ),
         )

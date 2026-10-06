@@ -54,6 +54,27 @@ Download diagnostics for the last 50 scheduling/dispatch/confirmation events.
 Verbose logging adds these events to the Home Assistant log at INFO level.
 The integration does not add entities to Recorder/InfluxDB allowlists.
 
+## Travel time estimates
+
+Use **Configure** on the integration entry, select a cover, and enter its full
+opening and closing times in seconds. Each direction is independent; zero
+(the default) disables its estimate. Repeat for the other covers. Settings
+apply without reloading the integration or sending commands.
+
+Individual covers expose `opening_time`, `closing_time`, and an optional UTC
+`estimated_completion` timestamp. The estimate starts at command dispatch,
+uses the remaining fraction of travel from the reported position, and is
+corrected when that position changes. It is approximate: motor speed, packet
+delay and position reporting can vary. It does not reschedule the cascade,
+replace `current_position`, or change the confirmation timeout. A duplicate
+command or unrelated state update does not restart the countdown.
+
+Stop, a replacement target, failure, unavailability, and unload clear the old
+estimate. No estimate is restored after restart or inferred for direct source
+commands. Reaching the estimated time is not confirmation; the card continues
+waiting for a device report. No periodic HA state updates are created for the
+countdown; the companion card updates its display locally.
+
 ## Development
 
 Python 3.14.2 or later. Install `requirements-test.txt`, then run `pytest -q`

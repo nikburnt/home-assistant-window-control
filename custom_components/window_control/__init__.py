@@ -27,12 +27,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if entity.unique_id not in allowed:
             entity_registry.async_remove(entity.entity_id)
     runtime.start()
+    entry.async_on_unload(entry.add_update_listener(async_options_updated))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     registry = dr.async_get(hass)
     if device := registry.async_get_device(identifiers={(DOMAIN, entry.entry_id)}):
         registry.async_update_device(device.id, area_id=entry.data.get("area_id"))
     runtime.publish()
     return True
+
+
+async def async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    entry.runtime_data.update_options()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
