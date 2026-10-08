@@ -75,15 +75,194 @@ async def test_cascade_and_curtain_start_together(hass, window):
     assert calls[-1][1] == "cover.right"
 
 
-async def test_repeated_intent_does_not_reset_cascade(hass, window):
+@pytest.mark.parametrize("target,service", [(100, "open_cover"), (0, "close_cover")])
+async def test_reverse_stagger_waits_for_response_without_reordering_members(
+    hass, window, freezer, target, service
+):
+    runtime, calls = window
+    hass.config_entries.async_update_entry(
+        runtime.entry, data={**runtime.entry.data, "reverse_stagger": True}
+    )
+    for source in runtime.members:
+        hass.states.async_set(source, "open", {"current_position": 50})
+    await flush(hass)
+    release = asyncio.Event()
+
+    async def slow(call):
+        calls.append((call.service, call.data["entity_id"]))
+        if call.data["entity_id"] == "cover.right":
+            await release.wait()
+
+    hass.services.async_register("cover", service, slow)
+    runtime.command(runtime.members, target, stagger=True)
+    await flush(hass)
+    assert [c[1] for c in calls] == ["cover.right", "cover.curtain"]
+    freezer.tick(3)
+    await advance(hass, 0)
+    assert len(calls) == 2
+    release.set()
+    await flush(hass)
+    freezer.tick(1)
+    await advance(hass, 0)
+    assert len(calls) == 2
+    freezer.tick(1)
+    await advance(hass, 0)
+    assert calls[-1][1] == "cover.middle"
+    freezer.tick(2)
+    await advance(hass, 0)
+    assert [c[1] for c in calls] == [
+        "cover.right",
+        "cover.curtain",
+        "cover.middle",
+        "cover.left",
+    ]
+    assert list(runtime.members) == [
+        "cover.left",
+        "cover.middle",
+        "cover.right",
+        "cover.curtain",
+    ]
+    assert runtime.entry.data["rollers"] == [
+        "cover.left",
+        "cover.middle",
+        "cover.right",
+    ]
+
+
+@pytest.mark.parametrize(
+    "target,service",
+    [(100, "open_cover"), (0, "close_cover"), (70, "set_cover_position")],
+)
+async def test_cascade_waits_for_each_response_then_interval(
+    hass, window, freezer, target, service
+):
+    runtime, calls = window
+    for source in runtime.members:
+        hass.states.async_set(source, "open", {"current_position": 50})
+    await flush(hass)
+    releases = {source: asyncio.Event() for source in SOURCES}
+
+    async def slow(call):
+        source = call.data["entity_id"]
+        calls.append((call.service, source, dt_util.utcnow()))
+        if source in releases:
+            await releases[source].wait()
+
+    hass.services.async_register("cover", service, slow)
+    runtime.command(runtime.members, target, stagger=True)
+    await flush(hass)
+    assert {c[1] for c in calls} == {"cover.left", "cover.curtain"}
+    freezer.tick(3)
+    await advance(hass, 0)
+    assert len(calls) == 2
+    releases["cover.left"].set()
+    await flush(hass)
+    assert runtime.members["cover.left"].phase == "awaiting_confirmation"
+    freezer.tick(1)
+    await advance(hass, 0)
+    assert len(calls) == 2
+    freezer.tick(1)
+    await advance(hass, 0)
+    assert calls[-1][1] == "cover.middle"
+    freezer.tick(3)
+    await advance(hass, 0)
+    assert len(calls) == 3
+    releases["cover.middle"].set()
+    await flush(hass)
+    freezer.tick(2)
+    await advance(hass, 0)
+    assert calls[-1][1] == "cover.right"
+    releases["cover.right"].set()
+    await flush(hass)
+
+
+async def test_repeated_group_command_replaces_pending_cascade(hass, window, freezer):
     runtime, calls = window
     runtime.command(SOURCES, 100, stagger=True)
-    timer = runtime.members["cover.right"].timer
     await flush(hass)
-    runtime.command(SOURCES, 100, stagger=True)
-    assert runtime.members["cover.right"].timer is timer
-    await advance(hass, 4.1)
-    assert len(calls) == 3
+    freezer.tick(1)
+    context = Context()
+    runtime.command(SOURCES, 100, context, stagger=True)
+    await flush(hass)
+    assert [c[1] for c in calls] == ["cover.left", "cover.left"]
+    freezer.tick(1)
+    await advance(hass, 0)
+    assert len(calls) == 2
+    freezer.tick(1)
+    await advance(hass, 0)
+    assert [c[1] for c in calls] == ["cover.left", "cover.left", "cover.middle"]
+    freezer.tick(2)
+    await advance(hass, 0)
+    assert [c[1] for c in calls] == [
+        "cover.left",
+        "cover.left",
+        "cover.middle",
+        "cover.right",
+    ]
+    assert all(c[3] is context for c in calls[1:])
+    assert not runtime._cascades
+
+
+@pytest.mark.parametrize(
+    "target,service",
+    [(0, "close_cover"), (100, "open_cover"), (50, "set_cover_position")],
+)
+async def test_reported_target_does_not_suppress_command(hass, window, target, service):
+    runtime, calls = window
+    hass.states.async_set(
+        "cover.left", "open" if target else "closed", {"current_position": target}
+    )
+    await flush(hass)
+    context = Context()
+    runtime.command(["cover.left"], target, context)
+    await flush(hass)
+    assert calls == [(service, "cover.left", 50 if target == 50 else None, context)]
+
+
+@pytest.mark.parametrize("target,service", [(0, "close_cover"), (100, "open_cover")])
+async def test_repeated_command_after_response_is_sent_again(
+    hass, window, target, service
+):
+    runtime, calls = window
+    hass.states.async_set("cover.left", "open", {"current_position": 50})
+    await flush(hass)
+    runtime.command(["cover.left"], target)
+    await flush(hass)
+    assert runtime.members["cover.left"].phase == "awaiting_confirmation"
+    context = Context()
+    runtime.command(["cover.left"], target, context)
+    await flush(hass)
+    assert [c[0] for c in calls] == [service, service]
+    assert calls[-1][3] is context
+
+
+@pytest.mark.parametrize(
+    "target,service", [(0, "close_cover"), (100, "open_cover"), ("stop", "stop_cover")]
+)
+async def test_repeated_inflight_command_keeps_latest_request(
+    hass, window, target, service
+):
+    runtime, calls = window
+    hass.states.async_set("cover.left", "open", {"current_position": 50})
+    await flush(hass)
+    release = asyncio.Event()
+
+    async def slow(call):
+        calls.append((call.service, call.context))
+        await release.wait()
+
+    hass.services.async_register("cover", service, slow)
+    runtime.command(["cover.left"], target)
+    await flush(hass)
+    runtime.command(["cover.left"], target)
+    context = Context()
+    runtime.command(["cover.left"], target, context)
+    await flush(hass)
+    assert len(calls) == 1
+    release.set()
+    await flush(hass)
+    assert [c[0] for c in calls] == [service, service]
+    assert calls[-1][1] is context
 
 
 async def test_individual_override_does_not_cancel_other_members(hass, window):
@@ -133,15 +312,24 @@ async def test_offline_member_does_not_block_or_replay(hass, window):
     hass.states.async_set("cover.middle", "unavailable")
     await flush(hass)
     runtime.command(SOURCES, 100, stagger=True)
+    await flush(hass)
     await advance(hass, 5)
     assert {c[1] for c in calls} == {"cover.left", "cover.right"}
     hass.states.async_set("cover.middle", "closed", {"current_position": 0})
     await flush(hass)
     assert len(calls) == 2
     runtime.command(SOURCES, 100, stagger=True)
+    await flush(hass)
     await advance(hass, 5)
     assert calls[-1][1] == "cover.middle"
-    assert len(calls) == 3
+    await advance(hass, 10)
+    assert [c[1] for c in calls] == [
+        "cover.left",
+        "cover.right",
+        "cover.left",
+        "cover.middle",
+        "cover.right",
+    ]
 
 
 async def test_commands_wait_for_real_position_confirmation(hass, window):
@@ -253,3 +441,171 @@ async def test_invalid_targets_do_not_change_intents(hass, window, target):
         runtime.command(SOURCES, target)
     assert not calls
     assert all(m.intent is None for m in runtime.members.values())
+
+
+@pytest.mark.parametrize("failure", ["exception", "timeout", "unavailable"])
+async def test_failed_response_releases_cascade(hass, window, freezer, failure):
+    runtime, calls = window
+    release = asyncio.Event()
+
+    async def slow(call):
+        source = call.data["entity_id"]
+        calls.append((call.service, source))
+        if source == "cover.left":
+            await release.wait()
+            raise RuntimeError("Transport failed")
+
+    hass.services.async_register("cover", "open_cover", slow)
+    runtime.command(SOURCES, 100, stagger=True)
+    await flush(hass)
+    if failure == "unavailable":
+        hass.states.async_set("cover.left", "unavailable")
+        await flush(hass)
+    if failure == "exception":
+        release.set()
+        await flush(hass)
+    else:
+        freezer.tick(7)
+        await advance(hass, 0)
+        assert len(calls) == 1
+        freezer.tick(1.1)
+        await advance(hass, 0)
+    assert runtime.members["cover.left"].phase == "error"
+    assert len(calls) == 1
+    freezer.tick(2)
+    await advance(hass, 0)
+    assert calls[-1][1] == "cover.middle"
+    freezer.tick(2)
+    await advance(hass, 0)
+    assert calls[-1][1] == "cover.right"
+
+
+@pytest.mark.parametrize("replacement", ["stop", 0])
+async def test_replacement_during_slow_response_cancels_old_cascade(
+    hass, window, freezer, replacement
+):
+    runtime, calls = window
+    for source in SOURCES:
+        hass.states.async_set(source, "open", {"current_position": 50})
+    await flush(hass)
+    release = asyncio.Event()
+
+    async def slow(call):
+        calls.append((call.service, call.data["entity_id"], None, call.context))
+        await release.wait()
+
+    hass.services.async_register("cover", "open_cover", slow)
+    runtime.command(SOURCES, 100, stagger=True)
+    await flush(hass)
+    context = Context()
+    runtime.command(SOURCES, replacement, context, stagger=True)
+    await flush(hass)
+    service = "stop_cover" if replacement == "stop" else "close_cover"
+    assert [(c[0], c[1]) for c in calls] == [
+        ("open_cover", "cover.left"),
+        (service, "cover.middle"),
+        (service, "cover.right"),
+    ]
+    release.set()
+    await flush(hass)
+    assert calls[-1][0:2] == (service, "cover.left")
+    assert all(c[3] is context for c in calls[1:])
+    freezer.tick(10)
+    await advance(hass, 0)
+    assert len(calls) == 4
+    assert not runtime._cascades
+
+
+@pytest.mark.parametrize("override_after_delay", [False, True])
+async def test_individual_override_skips_only_that_cascade_member(
+    hass, window, freezer, override_after_delay
+):
+    runtime, calls = window
+    release = asyncio.Event()
+
+    async def slow(call):
+        source = call.data["entity_id"]
+        calls.append((call.service, source, None, call.context))
+        if source == "cover.left":
+            await release.wait()
+
+    hass.services.async_register("cover", "open_cover", slow)
+    runtime.command(SOURCES, 100, stagger=True)
+    await flush(hass)
+    if override_after_delay:
+        release.set()
+        await flush(hass)
+        freezer.tick(1)
+        await advance(hass, 0)
+    runtime.command(["cover.middle"], 35)
+    await flush(hass)
+    assert [(c[0], c[1]) for c in calls] == [
+        ("open_cover", "cover.left"),
+        ("set_cover_position", "cover.middle"),
+    ]
+    if not override_after_delay:
+        freezer.tick(3)
+        await advance(hass, 0)
+        assert len(calls) == 2
+        release.set()
+        await flush(hass)
+        freezer.tick(1)
+        await advance(hass, 0)
+        assert len(calls) == 2
+    freezer.tick(1)
+    await advance(hass, 0)
+    assert calls[-1][0:2] == ("open_cover", "cover.right")
+    assert len(calls) == 3
+
+
+async def test_unload_during_response_never_releases_pending_commands(
+    hass, window, freezer
+):
+    runtime, calls = window
+    release = asyncio.Event()
+
+    async def slow(call):
+        calls.append(call.data["entity_id"])
+        await release.wait()
+
+    hass.services.async_register("cover", "open_cover", slow)
+    runtime.command(SOURCES, 100, stagger=True)
+    await flush(hass)
+    await runtime.close()
+    release.set()
+    freezer.tick(10)
+    await advance(hass, 0)
+    assert calls == ["cover.left"]
+    assert not runtime._cascades
+
+
+async def test_recovery_during_inflight_failure_still_waits_for_response(
+    hass, window, freezer
+):
+    runtime, calls = window
+    release = asyncio.Event()
+
+    async def slow(call):
+        source = call.data["entity_id"]
+        calls.append((call.service, source, None, call.context))
+        if source == "cover.left":
+            await release.wait()
+
+    hass.services.async_register("cover", "open_cover", slow)
+    runtime.command(SOURCES, 100, stagger=True)
+    await flush(hass)
+    hass.states.async_set("cover.left", "unavailable")
+    await flush(hass)
+    hass.states.async_set("cover.left", "open", {"current_position": 50})
+    await flush(hass)
+    runtime.command(["cover.left"], 35)
+    await flush(hass)
+    freezer.tick(3)
+    await advance(hass, 0)
+    assert len(calls) == 1
+    release.set()
+    await flush(hass)
+    assert calls[-1][0:2] == ("set_cover_position", "cover.left")
+    freezer.tick(2)
+    await advance(hass, 0)
+    assert calls[-1][0:2] == ("open_cover", "cover.middle")

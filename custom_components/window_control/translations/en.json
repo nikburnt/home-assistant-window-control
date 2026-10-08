@@ -19,11 +19,11 @@
     "step": {
       "user": {
         "title": "Window Control",
-        "data": {"name": "Window name", "rollers": "Roller shades (left to right)", "curtain": "Curtain", "area_id": "Area", "stagger_seconds": "Start interval", "travel_timeout": "Movement confirmation timeout"}
+        "data": {"name": "Window name", "rollers": "Roller shades (left to right)", "reverse_stagger": "Start Rollers From the Right", "curtain": "Curtain", "area_id": "Area", "stagger_seconds": "Start interval", "travel_timeout": "Movement confirmation timeout"}
       },
       "reconfigure": {
         "title": "Window Control",
-        "data": {"name": "Window name", "rollers": "Roller shades (left to right)", "curtain": "Curtain", "area_id": "Area", "stagger_seconds": "Start interval", "travel_timeout": "Movement confirmation timeout"}
+        "data": {"name": "Window name", "rollers": "Roller shades (left to right)", "reverse_stagger": "Start Rollers From the Right", "curtain": "Curtain", "area_id": "Area", "stagger_seconds": "Start interval", "travel_timeout": "Movement confirmation timeout"}
       }
     },
     "error": {

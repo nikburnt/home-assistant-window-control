@@ -6,6 +6,7 @@ from homeassistant.core import callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.selector import (
     AreaSelector,
+    BooleanSelector,
     EntitySelector,
     EntitySelectorConfig,
     NumberSelector,
@@ -33,6 +34,9 @@ class WindowConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Required(
                 "rollers", default=defaults.get("rollers", [])
             ): EntitySelector(EntitySelectorConfig(domain="cover", multiple=True)),
+            vol.Required(
+                "reverse_stagger", default=defaults.get("reverse_stagger", False)
+            ): BooleanSelector(),
             vol.Optional(
                 "curtain",
                 **({"default": defaults["curtain"]} if defaults.get("curtain") else {}),

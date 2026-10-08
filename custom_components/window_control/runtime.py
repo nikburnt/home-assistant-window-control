@@ -31,6 +31,8 @@ class Member:
     timer: Callable | None = None
     deadline: Callable | None = None
     task: asyncio.Task | None = None
+    response: asyncio.Event | None = None
+    inflight_response: asyncio.Event | None = None
     estimated_completion: datetime | None = None
     estimate_position: int | None = None
 
@@ -49,6 +51,7 @@ class WindowRuntime:
         self.trace = deque(maxlen=50)
         self._unsub = None
         self._closed = False
+        self._cascades: set[asyncio.Task] = set()
         self.travel_times = entry.options.get("travel_times", {})
 
     @property
@@ -153,6 +156,7 @@ class WindowRuntime:
             setattr(member, attribute, None)
 
     def _fail(self, member, reason):
+        self._release_pending(member)
         self._cancel_timer(member, "timer")
         self._cancel_timer(member, "deadline")
         member.intent = None
@@ -190,6 +194,60 @@ class WindowRuntime:
         member.estimated_completion = None
         self.record(member, "confirmed")
 
+    @staticmethod
+    def _release_pending(member):
+        # A superseded in-flight call releases its cascade only when it returns.
+        if (
+            member.response is not None
+            and member.response is not member.inflight_response
+        ):
+            member.response.set()
+
+    def _ready(self, member):
+        member.ready = True
+        if member.task is None:
+            member.task = self.hass.async_create_background_task(
+                self._dispatch(member),
+                f"window_control {member.source}",
+                eager_start=False,
+            )
+
+    async def _cascade(self, steps):
+        previous_response = None
+        for member, revision, response, needs_start in steps:
+            if self._closed or revision != member.revision:
+                continue
+            if needs_start:
+                delay = 0
+                if previous_response is not None:
+                    delay = (
+                        self.entry.data.get("stagger_seconds", 2)
+                        - (dt_util.utcnow() - previous_response).total_seconds()
+                    )
+                if delay > 0:
+                    wake = asyncio.Event()
+
+                    @callback
+                    def elapsed(_now, member=member, wake=wake):
+                        member.timer = None
+                        wake.set()
+
+                    cancel = async_call_later(self.hass, delay, elapsed)
+
+                    @callback
+                    def cancel_wait(cancel=cancel, wake=wake):
+                        cancel()
+                        wake.set()
+
+                    member.timer = cancel_wait
+                    await wake.wait()
+                if self._closed or revision != member.revision:
+                    continue
+                self._ready(member)
+                self.publish()
+            await response.wait()
+            previous_response = dt_util.utcnow()
+
     @callback
     def command(self, sources, intent, context=None, stagger=False):
         """Replace only the selected members. Never wait for a motor here."""
@@ -204,6 +262,10 @@ class WindowRuntime:
             raise ValueError("Position must be an integer from 0 to 100")
         if any(source not in self.members for source in sources):
             raise ValueError("Cover does not belong to this window")
+        if stagger and self.entry.data.get("reverse_stagger", False):
+            rollers = [s for s in sources if self.members[s].role == "roller"]
+            curtains = [s for s in sources if self.members[s].role == "curtain"]
+            sources = (*reversed(rollers), *curtains)
         reversing = intent != "stop" and any(
             (self.members[source].intent not in (None, "stop", intent))
             or (
@@ -221,17 +283,11 @@ class WindowRuntime:
             )
             for source in sources
         )
-        roller_index = 0
+        cascade = stagger and not reversing and intent != "stop"
+        steps = []
         for source in sources:
             member = self.members[source]
-            delay = 0
-            if member.role == "roller":
-                if stagger and not reversing and intent != "stop":
-                    delay = roller_index * self.entry.data.get("stagger_seconds", 2)
-                roller_index += 1
-            if member.intent == intent and member.phase != "error":
-                self.record(member, "duplicate_ignored", intent=intent)
-                continue
+            self._release_pending(member)
             self._cancel_timer(member, "timer")
             self._cancel_timer(member, "deadline")
             member.revision += 1
@@ -243,38 +299,34 @@ class WindowRuntime:
             if not self.available(source):
                 self._fail(member, "unavailable")
                 continue
-            # A stale transport call may still move the motor. Do not skip its correction.
-            if intent != "stop" and member.task is None and self._reached(member):
-                self._settled(member)
-                continue
             member.phase = "pending"
-            self.record(member, "requested", intent=intent, delay=delay)
-            revision = member.revision
-
-            @callback
-            def ready(_now=None, member=member, revision=revision):
-                if self._closed or revision != member.revision:
-                    return
-                member.timer = None
-                member.ready = True
-                if member.task is None:
-                    member.task = self.hass.async_create_background_task(
-                        self._dispatch(member),
-                        f"window_control {member.source}",
-                        eager_start=False,
-                    )
-                self.publish()
-
-            if delay:
-                member.timer = async_call_later(self.hass, delay, ready)
-            else:
-                ready()
+            member.response = asyncio.Event()
+            wait_for_previous = cascade and member.role == "roller" and bool(steps)
+            self.record(
+                member, "requested", intent=intent, wait_for_previous=wait_for_previous
+            )
+            if cascade and member.role == "roller":
+                steps.append(
+                    (member, member.revision, member.response, wait_for_previous)
+                )
+            if not wait_for_previous:
+                self._ready(member)
+        if len(steps) > 1:
+            task = self.hass.async_create_background_task(
+                self._cascade(steps), "window_control cascade", eager_start=False
+            )
+            self._cascades.add(task)
+            task.add_done_callback(self._cascades.discard)
         self.publish()
 
     async def _dispatch(self, member):
         try:
             while member.ready and member.intent is not None and not self._closed:
-                revision, intent = member.revision, member.intent
+                revision, intent, response = (
+                    member.revision,
+                    member.intent,
+                    member.response,
+                )
                 member.ready = False
                 if not self.available(member.source):
                     self._fail(member, "unavailable")
@@ -288,6 +340,7 @@ class WindowRuntime:
                     service = "set_cover_position"
                     data["position"] = intent
                 member.phase = "sending"
+                member.inflight_response = response
                 self._update_estimate(member)
                 self.record(member, "dispatch", service=service, intent=intent)
                 self.publish()
@@ -306,6 +359,7 @@ class WindowRuntime:
                         self._fail(member, type(error).__name__)
                 else:
                     if revision == member.revision and member.intent is not None:
+                        self.record(member, "response", intent=intent)
                         if self._reached(member):
                             self._settled(member)
                         else:
@@ -325,6 +379,9 @@ class WindowRuntime:
                                 self.entry.data.get("travel_timeout", 90),
                                 expired,
                             )
+                finally:
+                    response.set()
+                    member.inflight_response = None
                 self.publish()
         finally:
             member.task = None
@@ -334,7 +391,9 @@ class WindowRuntime:
         if self._unsub:
             self._unsub()
             self._unsub = None
-        tasks = []
+        tasks = list(self._cascades)
+        for task in tasks:
+            task.cancel()
         for member in self.members.values():
             self._cancel_timer(member, "timer")
             self._cancel_timer(member, "deadline")

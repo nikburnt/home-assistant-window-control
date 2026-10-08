@@ -10,8 +10,11 @@ Add `nikburnt/home-assistant-window-control` as a custom Integration repository
 in HACS, download, and restart Home Assistant. Add **Window Control** under
 Settings > Devices & services. Select roller shades in left-to-right order and
 an optional curtain. Existing sources must support open, close, stop and position.
-Settings can be changed using Reconfigure. The default start interval is two
-seconds; movement confirmation times out after 90 seconds.
+Settings can be changed using Reconfigure. The default interval after each
+command response is two seconds; movement confirmation times out after 90 seconds.
+Enable **Start Rollers From the Right** for a right-to-left cascade on that
+window, for both opening and closing. Keep the roller selection in physical
+left-to-right order: this setting does not reorder the card or rename entities.
 
 ## Entities and automations
 
@@ -30,19 +33,29 @@ mirrored. Direct commands to a physical source bypass the scheduler.
 
 ## Command contract
 
-- A normal group start dispatches rollers at 0, 2, 4... seconds. The curtain
-  starts at zero for whole-window commands. The interval is configurable.
+- A normal group start dispatches rollers in the configured start direction.
+  Each next roller waits for the preceding cover service to return, then for
+  the configured interval
+  (two seconds by default). It does not wait for the motor to finish moving.
+  The curtain starts with the first roller for whole-window commands and does
+  not delay the roller sequence. Even a zero interval waits for each response.
 - An individual command replaces only that member's intent. Others continue.
-- Repeating an active target is a no-op, preserving the original stagger.
+- Repeated commands are sent again, even when the reported position already
+  matches the target. A repeated group command replaces the pending cascade
+  and starts a new one; individual commands affect only their own member.
 - Stop cancels pending starts and sends stop to every targeted member.
 - A different target while a group is active replaces pending targets without
   a new stagger. There is no FIFO command queue.
 - An already in-flight device service cannot be recalled. Each member has one
-  transport call and one replaceable latest intent; other members never wait
-  for it. A call has an eight-second transport timeout. This cannot override
-  transport/firmware latency or guarantee cancellation of packets already sent.
+  transport call and one replaceable latest intent. Individual overrides, Stop
+  and group reversal do not wait for other members' responses. A call has an
+  eight-second transport timeout; a failed or timed-out call releases the next
+  roller after the interval. Covers unavailable before dispatch are skipped.
+  This cannot override transport/firmware latency or guarantee cancellation of
+  packets already sent. A successful service return
+  is not proof of physical motion; positions still require device reports.
 - Device failures are isolated. Recovery never replays old commands. Repeat
-  the group command to retry a failed member; active matching members continue.
+  the group command to send a new command to every available member.
 - Startup, reload and unload do not send movement commands. Pending starts and
   intents are not persisted. A motor already moving may continue on its own.
 - Position comes from the source, not a timer or optimistic animation. The
@@ -66,8 +79,9 @@ Individual covers expose `opening_time`, `closing_time`, and an optional UTC
 uses the remaining fraction of travel from the reported position, and is
 corrected when that position changes. It is approximate: motor speed, packet
 delay and position reporting can vary. It does not reschedule the cascade,
-replace `current_position`, or change the confirmation timeout. A duplicate
-command or unrelated state update does not restart the countdown.
+replace `current_position`, or change the confirmation timeout. Every new
+command, including a repeat, starts a new estimate when dispatched. An unrelated
+state update does not restart the countdown.
 
 Stop, a replacement target, failure, unavailability, and unload clear the old
 estimate. No estimate is restored after restart or inferred for direct source

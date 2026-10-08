@@ -106,6 +106,43 @@ async def test_config_flow_preserves_order(hass):
     await hass.config_entries.async_unload(result["result"].entry_id)
 
 
+async def test_reconfigure_start_direction_keeps_physical_order_and_entity_ids(hass):
+    sources(hass)
+    entry = MockConfigEntry(domain="window_control", title="Window", data=settings())
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    registry = er.async_get(hass)
+    original_ids = {
+        e.entity_id for e in er.async_entries_for_config_entry(registry, entry.entry_id)
+    }
+    flow = await hass.config_entries.flow.async_init(
+        "window_control", context={"source": "reconfigure", "entry_id": entry.entry_id}
+    )
+    assert flow["data_schema"](settings())["reverse_stagger"] is False
+    result = await hass.config_entries.flow.async_configure(
+        flow["flow_id"], settings() | {"reverse_stagger": True}
+    )
+    assert result["reason"] == "reconfigure_successful"
+    await hass.async_block_till_done()
+    assert entry.data["reverse_stagger"] is True
+    assert list(entry.runtime_data.members) == [
+        "cover.left",
+        "cover.right",
+        "cover.curtain",
+    ]
+    assert original_ids == {
+        e.entity_id for e in er.async_entries_for_config_entry(registry, entry.entry_id)
+    }
+    assert not entry.runtime_data.trace
+    flow = await hass.config_entries.flow.async_init(
+        "window_control", context={"source": "reconfigure", "entry_id": entry.entry_id}
+    )
+    assert flow["data_schema"](settings())["reverse_stagger"] is True
+    hass.config_entries.flow.async_abort(flow["flow_id"])
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
 async def test_config_flow_rejects_duplicate_sources(hass):
     sources(hass)
     result = await hass.config_entries.flow.async_init(
@@ -132,7 +169,8 @@ async def test_config_flow_rejects_ownership_overlap(hass):
     assert result["errors"] == {"base": "already_owned"}
 
 
-async def test_standard_services_reach_physical_covers(hass):
+@pytest.mark.parametrize("reverse_stagger", [False, True])
+async def test_standard_services_reach_physical_covers(hass, reverse_stagger):
     from homeassistant.components.cover import CoverEntity
     from homeassistant.setup import async_setup_component
 
@@ -142,7 +180,7 @@ async def test_standard_services_reach_physical_covers(hass):
         _attr_should_poll = False
         _attr_supported_features = 15
         _attr_is_closed = False
-        _attr_current_cover_position = 50
+        _attr_current_cover_position = 100
 
         def __init__(self, name):
             self.entity_id = "cover." + name
@@ -164,7 +202,11 @@ async def test_standard_services_reach_physical_covers(hass):
     await hass.data["cover"].async_add_entities(
         [PhysicalCover(name) for name in ("left", "right", "curtain")]
     )
-    entry = MockConfigEntry(domain="window_control", title="Window", data=settings())
+    entry = MockConfigEntry(
+        domain="window_control",
+        title="Window",
+        data=settings() | {"reverse_stagger": reverse_stagger},
+    )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
@@ -179,11 +221,25 @@ async def test_standard_services_reach_physical_covers(hass):
     for _ in range(20):
         await asyncio.sleep(0)
     await hass.async_block_till_done()
-    assert calls == [
+    expected = [
         ("open", "cover.left"),
-        ("open", "cover.right"),
         ("open", "cover.curtain"),
+        ("open", "cover.right"),
     ]
+    if reverse_stagger:
+        expected = [
+            ("open", "cover.right"),
+            ("open", "cover.curtain"),
+            ("open", "cover.left"),
+        ]
+    assert calls == expected
+    await hass.services.async_call(
+        "button", "press", {"entity_id": button}, blocking=True
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+    await hass.async_block_till_done()
+    assert calls == expected * 2
     individual = registry.async_get_entity_id(
         "cover", "window_control", entry.entry_id + "_cover.right"
     )

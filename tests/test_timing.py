@@ -51,7 +51,9 @@ async def test_direction_and_partial_travel(
         assert runtime.position(source) == start
 
 
-async def test_stagger_and_duplicate_do_not_reset_estimate(hass, window, freezer):
+async def test_repeated_group_command_restarts_estimates_on_dispatch(
+    hass, window, freezer
+):
     runtime, calls = window
     configure(hass, runtime)
     now = dt_util.utcnow()
@@ -67,15 +69,30 @@ async def test_stagger_and_duplicate_do_not_reset_estimate(hass, window, freezer
         seconds=35
     )
     runtime.command(SOURCES, 100, stagger=True)
+    assert runtime.members["cover.left"].estimated_completion is None
+    assert runtime.members["cover.middle"].estimated_completion is None
+    await flush(hass)
     assert runtime.members["cover.left"].estimated_completion == now + timedelta(
-        seconds=33
+        seconds=35
     )
     freezer.tick(2)
     await advance(hass, 0)
-    assert runtime.members["cover.right"].estimated_completion == now + timedelta(
-        seconds=45
+    assert runtime.members["cover.middle"].estimated_completion == now + timedelta(
+        seconds=37
     )
-    assert len(calls) == 3
+    assert runtime.members["cover.right"].estimated_completion is None
+    freezer.tick(2)
+    await advance(hass, 0)
+    assert runtime.members["cover.right"].estimated_completion == now + timedelta(
+        seconds=47
+    )
+    assert [c[1] for c in calls] == [
+        "cover.left",
+        "cover.middle",
+        "cover.left",
+        "cover.middle",
+        "cover.right",
+    ]
 
 
 async def test_reports_correct_estimate_but_unrelated_updates_do_not(
